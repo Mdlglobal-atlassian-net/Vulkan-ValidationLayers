@@ -1870,6 +1870,7 @@ bool SyncValidator::DetectDescriptorSetHazard(const CMD_BUFFER_STATE &cmd, VkPip
             for (uint32_t i = index_range.start; i < index_range.end; ++i, ++array_idx) {
                 uint32_t index = i - index_range.start;
                 const auto *descriptor = descriptor_set->GetDescriptorFromGlobalIndex(i);
+                const auto descriptor_type = descriptor_set->GetTypeFromIndex(index);
                 if (descriptor->GetClass() == DescriptorClass::ImageSampler || descriptor->GetClass() == DescriptorClass::Image) {
                     const IMAGE_VIEW_STATE *img_view_state = nullptr;
                     if (descriptor->GetClass() == DescriptorClass::ImageSampler) {
@@ -1878,10 +1879,15 @@ bool SyncValidator::DetectDescriptorSetHazard(const CMD_BUFFER_STATE &cmd, VkPip
                         img_view_state = static_cast<const ImageDescriptor *>(descriptor)->GetImageViewState();
                     }
                     if (!img_view_state) continue;
+                    SyncStageAccessIndex sync_index;
+                    if (descriptor_type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) {
+                        sync_index = SYNC_FRAGMENT_SHADER_INPUT_ATTACHMENT_READ;
+                    } else {
+                        sync_index = SYNC_VERTEX_SHADER_SHADER_READ;
+                    }
                     const IMAGE_STATE *img_state = img_view_state->image_state.get();
-                    auto hazard =
-                        context->DetectHazard(*img_state, SYNC_TRANSFER_TRANSFER_READ, img_view_state->create_info.subresourceRange,
-                                              {0, 0, 0}, img_state->createInfo.extent);
+                    auto hazard = context->DetectHazard(*img_state, sync_index, img_view_state->create_info.subresourceRange,
+                                                        {0, 0, 0}, img_state->createInfo.extent);
                     if (hazard.hazard) {
                         skip |= LogError(img_view_state->image_view, string_SyncHazardVUID(hazard.hazard),
                                          "%s: Hazard %s for %s in %s and %s binding #%d index %d", function,
@@ -1899,7 +1905,7 @@ bool SyncValidator::DetectDescriptorSetHazard(const CMD_BUFFER_STATE &cmd, VkPip
                         buf_range = buf_state->createInfo.size;
                     }
                     ResourceAccessRange range = MakeRange(buf_view_state->create_info.offset, buf_range);
-                    auto hazard = context->DetectHazard(*buf_state, SYNC_TRANSFER_TRANSFER_READ, range);
+                    auto hazard = context->DetectHazard(*buf_state, SYNC_VERTEX_SHADER_SHADER_READ, range);
                     if (hazard.hazard) {
                         skip |= LogError(buf_view_state->buffer_view, string_SyncHazardVUID(hazard.hazard),
                                          "%s: Hazard %s for %s in %s and %s binding #%d index %d", function,
@@ -1912,7 +1918,14 @@ bool SyncValidator::DetectDescriptorSetHazard(const CMD_BUFFER_STATE &cmd, VkPip
                     auto buf_state = static_cast<const BufferDescriptor *>(descriptor)->GetBufferState();
                     if (!buf_state) continue;
                     ResourceAccessRange range = MakeRange(0, buf_state->createInfo.size);
-                    auto hazard = context->DetectHazard(*buf_state, SYNC_TRANSFER_TRANSFER_READ, range);
+                    SyncStageAccessIndex sync_index;
+                    if (descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+                        descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+                        sync_index = SYNC_VERTEX_SHADER_UNIFORM_READ;
+                    } else {
+                        sync_index = SYNC_VERTEX_SHADER_SHADER_READ;
+                    }
+                    auto hazard = context->DetectHazard(*buf_state, sync_index, range);
                     if (hazard.hazard) {
                         skip |= LogError(buf_state->buffer, string_SyncHazardVUID(hazard.hazard),
                                          "%s: Hazard %s for %s in %s and %s binding #%d index %d", function,
@@ -1969,6 +1982,7 @@ void SyncValidator::UpdateDescriptorSetAccessState(const CMD_BUFFER_STATE &cmd, 
             for (uint32_t i = index_range.start; i < index_range.end; ++i, ++array_idx) {
                 uint32_t index = i - index_range.start;
                 const auto *descriptor = descriptor_set->GetDescriptorFromGlobalIndex(i);
+                const auto descriptor_type = descriptor_set->GetTypeFromIndex(index);
                 if (descriptor->GetClass() == DescriptorClass::ImageSampler || descriptor->GetClass() == DescriptorClass::Image) {
                     const IMAGE_VIEW_STATE *img_view_state = nullptr;
                     if (descriptor->GetClass() == DescriptorClass::ImageSampler) {
@@ -1977,9 +1991,14 @@ void SyncValidator::UpdateDescriptorSetAccessState(const CMD_BUFFER_STATE &cmd, 
                         img_view_state = static_cast<const ImageDescriptor *>(descriptor)->GetImageViewState();
                     }
                     if (!img_view_state) continue;
+                    SyncStageAccessIndex sync_index;
+                    if (descriptor_type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) {
+                        sync_index = SYNC_FRAGMENT_SHADER_INPUT_ATTACHMENT_READ;
+                    } else {
+                        sync_index = SYNC_VERTEX_SHADER_SHADER_READ;
+                    }
                     const IMAGE_STATE *img_state = img_view_state->image_state.get();
-                    context->UpdateAccessState(*img_state, SYNC_TRANSFER_TRANSFER_READ,
-                                               img_view_state->create_info.subresourceRange, {0, 0, 0},
+                    context->UpdateAccessState(*img_state, sync_index, img_view_state->create_info.subresourceRange, {0, 0, 0},
                                                img_state->createInfo.extent, tag);
 
                 } else if (descriptor->GetClass() == DescriptorClass::TexelBuffer) {
@@ -1987,13 +2006,20 @@ void SyncValidator::UpdateDescriptorSetAccessState(const CMD_BUFFER_STATE &cmd, 
                     if (!buf_view_state) continue;
                     const BUFFER_STATE *buf_state = buf_view_state->buffer_state.get();
                     ResourceAccessRange range = MakeRange(buf_view_state->create_info.offset, buf_view_state->create_info.range);
-                    context->UpdateAccessState(*buf_state, SYNC_TRANSFER_TRANSFER_READ, range, tag);
+                    context->UpdateAccessState(*buf_state, SYNC_VERTEX_SHADER_SHADER_READ, range, tag);
 
                 } else if (descriptor->GetClass() == DescriptorClass::GeneralBuffer) {
                     auto buf_state = static_cast<const BufferDescriptor *>(descriptor)->GetBufferState();
                     if (!buf_state) continue;
+                    SyncStageAccessIndex sync_index;
+                    if (descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+                        descriptor_type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+                        sync_index = SYNC_VERTEX_SHADER_UNIFORM_READ;
+                    } else {
+                        sync_index = SYNC_VERTEX_SHADER_SHADER_READ;
+                    }
                     ResourceAccessRange range = MakeRange(0, buf_state->createInfo.size);
-                    context->UpdateAccessState(*buf_state, SYNC_TRANSFER_TRANSFER_READ, range, tag);
+                    context->UpdateAccessState(*buf_state, sync_index, range, tag);
                 }
             }
         }
@@ -2040,8 +2066,7 @@ bool SyncValidator::DetectVertexHazard(const CMD_BUFFER_STATE &cmd, uint32_t ver
                 range_size = vertexCount * binding_description.stride;
             }
             ResourceAccessRange range = MakeRange(range_start, range_size);
-            auto *buf_state = Get<BUFFER_STATE>(binding_buffer.buffer);
-            auto hazard = context->DetectHazard(*buf_state, SYNC_TRANSFER_TRANSFER_READ, range);
+            auto hazard = context->DetectHazard(*buf_state, SYNC_VERTEX_INPUT_VERTEX_ATTRIBUTE_READ, range);
             if (hazard.hazard) {
                 skip |= LogError(buf_state->buffer, string_SyncHazardVUID(hazard.hazard), "%s: Hazard %s for vertex %s in %s",
                                  function, string_SyncHazard(hazard.hazard), report_data->FormatHandle(buf_state->buffer).c_str(),
@@ -2089,8 +2114,7 @@ void SyncValidator::UpdateVertexAccessState(const CMD_BUFFER_STATE &cmd, CMD_TYP
                 range_size = vertexCount * binding_description.stride;
             }
             ResourceAccessRange range = MakeRange(range_start, range_size);
-            auto *buf_state = Get<BUFFER_STATE>(binding_buffer.buffer);
-            context->UpdateAccessState(*buf_state, SYNC_TRANSFER_TRANSFER_READ, range, tag);
+            context->UpdateAccessState(*buf_state, SYNC_VERTEX_INPUT_VERTEX_ATTRIBUTE_READ, range, tag);
         }
     }
 }
@@ -2113,7 +2137,7 @@ bool SyncValidator::DetectVertexIndexHazard(const CMD_BUFFER_STATE &cmd, uint32_
     VkDeviceSize range_start = cmd.index_buffer_binding.offset + firstIndex * index_size;
     VkDeviceSize range_size = indexCount * index_size;
     ResourceAccessRange range = MakeRange(range_start, range_size);
-    auto hazard = context->DetectHazard(*index_buf_state, SYNC_TRANSFER_TRANSFER_READ, range);
+    auto hazard = context->DetectHazard(*index_buf_state, SYNC_VERTEX_INPUT_INDEX_READ, range);
     if (hazard.hazard) {
         skip |= LogError(index_buf_state->buffer, string_SyncHazardVUID(hazard.hazard), "%s: Hazard %s for index %s in %s",
                          function, string_SyncHazard(hazard.hazard), report_data->FormatHandle(index_buf_state->buffer).c_str(),
@@ -2196,7 +2220,7 @@ void SyncValidator::UpdateVertexIndexAccessState(const CMD_BUFFER_STATE &cmd, CM
     VkDeviceSize range_start = cmd.index_buffer_binding.offset + firstIndex * index_size;
     VkDeviceSize range_size = indexCount * index_size;
     ResourceAccessRange range = MakeRange(range_start, range_size);
-    context->UpdateAccessState(*index_buf_state, SYNC_TRANSFER_TRANSFER_READ, range, tag);
+    context->UpdateAccessState(*index_buf_state, SYNC_VERTEX_INPUT_INDEX_READ, range, tag);
 
     // TODO: For now, we detect the whole vertex buffer. Index buffer could be changed until SubmitQueue.
     //       We will detect more accurate range in the future.
